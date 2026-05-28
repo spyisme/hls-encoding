@@ -115,9 +115,12 @@ jobs:
                 '-g 60',
                 '-hls_time 6',
                 '-hls_playlist_type vod',
-                `-hls_segment_filename ${outDir}/${tier.name}_%03d.ts`
+                `-hls_segment_filename ${path.join(outDir, `${tier.name}_%03d.ts`)}`
               ])
-              .on('progress', (p) => console.log(`PROGRESS_MARKER:${tier.name}:${p.percent ? p.percent.toFixed(0) : 0}`))
+              .on('progress', (p) => {
+                const percent = Number.isFinite(p.percent) ? p.percent.toFixed(0) : 0;
+                console.log(`PROGRESS_MARKER:${tier.name}:${percent}`);
+              })
               .on('end', resolve)
               .on('error', reject)
               .run();
