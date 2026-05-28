@@ -64,10 +64,26 @@ jobs:
             ? `r2:${process.env.BUCKET}/${process.env.PARENT_FOLDER}/${process.env.OUTPUT_NAME}`
             : null;
 
+          const toBandwidth = (vBit) => {
+            const match = String(vBit).trim().match(/^(\d+(?:\.\d+)?)([kKmM])?$/);
+            if (!match) {
+              return parseInt(vBit, 10) * 1000;
+            }
+
+            const value = Number(match[1]);
+            if (!match[2]) {
+              return Math.round(value);
+            }
+
+            const unit = match[2].toLowerCase();
+            const multiplier = unit === 'm' ? 1000000 : 1000;
+            return Math.round(value * multiplier);
+          };
+
           const writeMaster = (tiers) => {
             let master = `#EXTM3U\n#EXT-X-VERSION:3\n`;
             tiers.forEach(t => {
-              master += `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(t.vBit) * 1000},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
+              master += `#EXT-X-STREAM-INF:BANDWIDTH=${toBandwidth(t.vBit)},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
             });
             fs.writeFileSync(path.join(outputRoot, 'master.m3u8'), master);
           };
