@@ -75,11 +75,11 @@ jobs:
           const runRcloneSync = (label) => {
             if (!rcloneTarget) {
               console.log(`RCLONE_SYNC_SKIPPED:${label}`);
-              return Promise.resolve();
+              return Promise.resolve(true);
             }
 
             console.log(`RCLONE_SYNC_START:${label}`);
-            return new Promise((resolve, reject) => {
+            return new Promise((resolve) => {
               const args = [
                 'copy',
                 outputRoot,
@@ -90,13 +90,17 @@ jobs:
                 '-P'
               ];
               const proc = spawn('rclone', args, { stdio: 'inherit' });
-              proc.on('error', reject);
+              proc.on('error', (error) => {
+                console.error(`RCLONE_SYNC_FAILED:${label}`, error);
+                resolve(false);
+              });
               proc.on('close', (code) => {
                 if (code === 0) {
                   console.log(`RCLONE_SYNC_DONE:${label}`);
-                  resolve();
+                  resolve(true);
                 } else {
-                  reject(new Error(`rclone exited with code ${code}`));
+                  console.error(`RCLONE_SYNC_FAILED:${label}: exit ${code}`);
+                  resolve(false);
                 }
               });
             });
@@ -162,7 +166,10 @@ jobs:
                   await encodeTier(tier);
                   encodedTiers.push(tier);
                   writeMaster(encodedTiers);
-                  await runRcloneSync(tier.name);
+                  const synced = await runRcloneSync(tier.name);
+                  if (!synced) {
+                    console.log(`RCLONE_SYNC_CONTINUE:${tier.name}`);
+                  }
                 }
                 console.log("TRANSCODE_SUCCESSFUL");
               } catch (encodeErr) {
