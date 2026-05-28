@@ -122,7 +122,7 @@ jobs:
                 `-hls_segment_filename ${path.join(outDir, `${tier.name}_%03d.ts`)}`
               ])
               .on('progress', (p) => {
-                const percent = Number.isFinite(p.percent) ? p.percent.toFixed(0) : 0;
+                const percent = Number.isFinite(p.percent) ? p.percent.toFixed(0) : '0';
                 console.log(`PROGRESS_MARKER:${tier.name}:${percent}`);
               })
               .on('end', resolve)
