@@ -46,15 +46,82 @@ jobs:
         id: transcode
         env:
           OUTPUT_NAME: ${{ github.event.client_payload.output_name }}
+          PARENT_FOLDER: ${{ github.event.client_payload.parent_folder }}
+          BUCKET: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           cat <<'EOF' > run-encode.js
           const ffmpeg = require('fluent-ffmpeg');
           const fs = require('fs');
           const path = require('path');
+          const { spawn } = require('child_process');
           
           const input = 'input.mp4';
-          const outDir = './output/media';
+          const outputRoot = './output';
+          const outDir = path.join(outputRoot, 'media');
           fs.mkdirSync(outDir, { recursive: true });
+
+          const rcloneTarget = process.env.BUCKET && process.env.PARENT_FOLDER && process.env.OUTPUT_NAME
+            ? `r2:${process.env.BUCKET}/${process.env.PARENT_FOLDER}/${process.env.OUTPUT_NAME}`
+            : null;
+
+          const writeMaster = (tiers) => {
+            let master = `#EXTM3U\n#EXT-X-VERSION:3\n`;
+            tiers.forEach(t => {
+              master += `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(t.vBit) * 1000},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
+            });
+            fs.writeFileSync(path.join(outputRoot, 'master.m3u8'), master);
+          };
+
+          const runRcloneSync = (label) => {
+            if (!rcloneTarget) {
+              console.log(`RCLONE_SYNC_SKIPPED:${label}`);
+              return Promise.resolve();
+            }
+
+            console.log(`RCLONE_SYNC_START:${label}`);
+            return new Promise((resolve, reject) => {
+              const args = [
+                'copy',
+                outputRoot,
+                rcloneTarget,
+                '--transfers', '16',
+                '--checkers', '32',
+                '--fast-list',
+                '-P'
+              ];
+              const proc = spawn('rclone', args, { stdio: 'inherit' });
+              proc.on('error', reject);
+              proc.on('close', (code) => {
+                if (code === 0) {
+                  console.log(`RCLONE_SYNC_DONE:${label}`);
+                  resolve();
+                } else {
+                  reject(new Error(`rclone exited with code ${code}`));
+                }
+              });
+            });
+          };
+
+          const encodeTier = (tier) => new Promise((resolve, reject) => {
+            console.log(`Encoding tier: ${tier.name}`);
+            ffmpeg(input)
+              .output(path.join(outDir, `${tier.name}.m3u8`))
+              .videoCodec('libx264')
+              .audioCodec('aac')
+              .size(tier.res)
+              .videoBitrate(tier.vBit)
+              .addOptions([
+                '-preset veryfast',
+                '-g 60',
+                '-hls_time 6',
+                '-hls_playlist_type vod',
+                `-hls_segment_filename ${outDir}/${tier.name}_%03d.ts`
+              ])
+              .on('progress', (p) => console.log(`PROGRESS_MARKER:${tier.name}:${p.percent ? p.percent.toFixed(0) : 0}`))
+              .on('end', resolve)
+              .on('error', reject)
+              .run();
+          });
 
           ffmpeg.ffprobe(input, (err, metadata) => {
             if (err) { console.error(err); process.exit(1); }
@@ -69,56 +136,39 @@ jobs:
             ffmpeg(input).screenshots({
               timestamps: [randomTime],
               filename: 'thumbnail.jpg',
-              folder: './output',
+              folder: outputRoot,
               size: nativeHeight >= 1080 ? '1920x1080' : '1280x720'
-            }).on('end', () => {
-              
-              const command = ffmpeg(input);
-              const activeTiers = [];
+            }).on('end', async () => {
               const tiersConfig = [
                 { maxTarget: 480, res: '854x480', vBit: '800k', name: '480p' },
                 { maxTarget: 720, res: '1280x720', vBit: '2800k', name: '720p' },
                 { maxTarget: 1080, res: '1920x1080', vBit: '5000k', name: '1080p' }
               ];
 
-              tiersConfig.forEach(tier => {
-                if (nativeHeight >= tier.maxTarget) {
-                  console.log(`Configuring encoding stream for: ${tier.name}`);
-                  command.output(path.join(outDir, `${tier.name}.m3u8`))
-                    .videoCodec('libx264')
-                    .audioCodec('aac')
-                    .size(tier.res)
-                    .videoBitrate(tier.vBit)
-                    .addOptions([
-                      '-preset veryfast', 
-                      '-g 60', 
-                      '-hls_time 6', 
-                      '-hls_playlist_type vod', 
-                      `-hls_segment_filename ${outDir}/${tier.name}_%03d.ts`
-                    ]);
-                  activeTiers.push(tier);
-                }
-              });
-
-              if (activeTiers.length === 0) {
+              const eligibleTiers = tiersConfig.filter(tier => nativeHeight >= tier.maxTarget);
+              if (eligibleTiers.length === 0) {
                 const width = videoStream.width || Math.round((nativeHeight * 16) / 9);
                 const height = nativeHeight || 360;
                 const fallbackName = `${height}p`;
-                command.output(path.join(outDir, `${fallbackName}.m3u8`))
-                  .videoCodec('libx264').audioCodec('aac')
-                  .addOptions(['-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod', `-hls_segment_filename ${outDir}/${fallbackName}_%03d.ts`]);
-                activeTiers.push({ res: `${width}x${height}`, vBit: '500k', name: fallbackName });
+                eligibleTiers.push({ res: `${width}x${height}`, vBit: '500k', name: fallbackName });
               }
 
-              command.on('progress', (p) => console.log(`PROGRESS_MARKER:${p.percent ? p.percent.toFixed(0) : 0}`))
-              .on('end', () => {
-                let master = `#EXTM3U\n#EXT-X-VERSION:3\n`;
-                activeTiers.forEach(t => {
-                  master += `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(t.vBit) * 1000},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
-                });
-                fs.writeFileSync('./output/master.m3u8', master);
+              const encodedTiers = [];
+              try {
+                for (const tier of eligibleTiers) {
+                  await encodeTier(tier);
+                  encodedTiers.push(tier);
+                  writeMaster(encodedTiers);
+                  await runRcloneSync(tier.name);
+                }
                 console.log("TRANSCODE_SUCCESSFUL");
-              }).on('error', (err) => { console.error(err); process.exit(1); }).run();
+              } catch (encodeErr) {
+                console.error(encodeErr);
+                process.exit(1);
+              }
+            }).on('error', (shotErr) => {
+              console.error(shotErr);
+              process.exit(1);
             });
           });
           EOF
