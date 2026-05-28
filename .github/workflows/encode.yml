@@ -68,7 +68,7 @@ jobs:
             const match = String(vBit).trim().match(/^(\d+(?:\.\d+)?)([kKmM])?$/);
             if (!match) {
               const parsed = parseInt(vBit, 10);
-              return Number.isFinite(parsed) ? parsed * 1000 : 0;
+              return Number.isFinite(parsed) ? parsed : 0;
             }
 
             const value = Number(match[1]);
@@ -179,6 +179,7 @@ jobs:
               }
 
               const encodedTiers = [];
+              let syncFailures = 0;
               try {
                 for (const tier of eligibleTiers) {
                   await encodeTier(tier);
@@ -186,8 +187,12 @@ jobs:
                   writeMaster(encodedTiers);
                   const synced = await runRcloneSync(tier.name);
                   if (!synced) {
+                    syncFailures += 1;
                     console.log(`RCLONE_SYNC_CONTINUE:${tier.name}`);
                   }
+                }
+                if (syncFailures > 0) {
+                  console.log(`RCLONE_SYNC_FAILURES:${syncFailures}`);
                 }
                 console.log("TRANSCODE_SUCCESSFUL");
               } catch (encodeErr) {
