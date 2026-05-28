@@ -176,7 +176,8 @@ You should see:
 │   └── workflows/
 │       └── encode.yml          # GitHub Actions encoding pipeline
 ├── public/
-│   └── index.html              # Web dashboard (glassmorphism UI)
+│   ├── index.html              # Web dashboard (glassmorphism UI)
+│   └── player.html             # NEW: Premium HLS Stream Player
 ├── .env.example                # Environment variable template
 ├── .gitignore                  # Ignores node_modules, uploads, .env
 ├── package.json                # Node.js dependencies

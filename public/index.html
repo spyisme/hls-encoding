@@ -136,6 +136,32 @@
       transition: all 0.3s ease;
     }
     .health-badge.online { border-color: rgba(16, 185, 129, 0.3); }
+    .header-nav {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 20px;
+    }
+    .nav-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      text-decoration: none;
+      backdrop-filter: blur(12px);
+      transition: all 0.3s ease;
+    }
+    .nav-link:hover {
+      color: var(--text-primary);
+      border-color: var(--cyan);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px var(--cyan-glow);
+    }
     .health-dot {
       width: 8px; height: 8px;
       border-radius: 50%;
@@ -449,6 +475,9 @@
       <div class="health-badge" id="healthBadge">
         <span class="health-dot" id="healthDot"></span>
         <span id="healthText">Checking system...</span>
+      </div>
+      <div class="header-nav">
+        <a href="/player.html" class="nav-link">📺 Stream Player</a>
       </div>
     </header>
 
