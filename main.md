@@ -125,8 +125,7 @@ jobs:
               const tiersConfig = [
                 { maxTarget: 480, res: '854x480', vBit: '800k', name: '480p' },
                 { maxTarget: 720, res: '1280x720', vBit: '2800k', name: '720p' },
-                { maxTarget: 1080, res: '1920x1080', vBit: '5000k', name: '1080p' },
-                { maxTarget: 2160, res: '3840x2160', vBit: '12000k', name: '4K' }
+                { maxTarget: 1080, res: '1920x1080', vBit: '5000k', name: '1080p' }
               ];
 
               tiersConfig.forEach(tier => {
@@ -149,10 +148,13 @@ jobs:
               });
 
               if (activeTiers.length === 0) {
-                command.output(path.join(outDir, 'native.m3u8'))
+                const width = videoStream.width || Math.round((nativeHeight * 16) / 9);
+                const height = nativeHeight || 360;
+                const fallbackName = `${height}p`;
+                command.output(path.join(outDir, `${fallbackName}.m3u8`))
                   .videoCodec('libx264').audioCodec('aac')
-                  .addOptions(['-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod', `-hls_segment_filename ${outDir}/native_%03d.ts`]);
-                activeTiers.push({ res: `Native(${nativeHeight}p)`, vBit: '500k', name: 'native' });
+                  .addOptions(['-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod', `-hls_segment_filename ${outDir}/${fallbackName}_%03d.ts`]);
+                activeTiers.push({ res: `${width}x${height}`, vBit: '500k', name: fallbackName });
               }
 
               command.on('progress', (p) => console.log(`PROGRESS_MARKER:${p.percent ? p.percent.toFixed(0) : 0}`))
