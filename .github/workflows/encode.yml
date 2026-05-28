@@ -67,7 +67,8 @@ jobs:
           const toBandwidth = (vBit) => {
             const match = String(vBit).trim().match(/^(\d+(?:\.\d+)?)([kKmM])?$/);
             if (!match) {
-              return parseInt(vBit, 10) * 1000;
+              const parsed = parseInt(vBit, 10);
+              return Number.isFinite(parsed) ? parsed * 1000 : 0;
             }
 
             const value = Number(match[1]);
@@ -124,6 +125,7 @@ jobs:
 
           const encodeTier = (tier) => new Promise((resolve, reject) => {
             console.log(`Encoding tier: ${tier.name}`);
+            const segmentPattern = `${tier.name}_%03d.ts`;
             ffmpeg(input)
               .output(path.join(outDir, `${tier.name}.m3u8`))
               .videoCodec('libx264')
@@ -135,7 +137,7 @@ jobs:
                 '-g 60',
                 '-hls_time 6',
                 '-hls_playlist_type vod',
-                `-hls_segment_filename ${path.join(outDir, `${tier.name}_%03d.ts`)}`
+                `-hls_segment_filename ${path.join(outDir, segmentPattern)}`
               ])
               .on('progress', (p) => {
                 const percent = Number.isFinite(p.percent) ? p.percent.toFixed(0) : '0';
