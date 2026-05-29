@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HLS Stream Player</title>
+  <meta name="description" content="Minimalist, production-ready HLS player">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Plyr Minimalist Player CSS -->
+  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+  
+  <!-- HLS.js + Plyr scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    :root {
+      --bg-base: #0a0a0c;
+      --bg-surface: #121215;
+      --border-color: #242429;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent: #2563eb; /* Clean flat corporate blue */
+      --accent-hover: #1d4ed8;
+      --radius: 8px;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 60px 24px;
+      width: 100%;
+    }
+
+    /* Navigation */
+    .nav-bar {
+      margin-bottom: 40px;
+    }
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+    .back-link:hover {
+      color: var(--text-main);
+    }
+
+    /* Header */
+    .header {
+      margin-bottom: 32px;
+    }
+    .header h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+    .header p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    /* Stream URL form */
+    .stream-loader {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .loader-form {
+      display: flex;
+      gap: 12px;
+    }
+    @media (max-width: 600px) {
+      .loader-form { flex-direction: column; }
+    }
+    .input-wrap {
+      flex: 1;
+    }
+    .loader-form input {
+      width: 100%;
+      background-color: #050507;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px 16px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .loader-form input:focus {
+      border-color: #4b5563;
+    }
+    .loader-form button {
+      background-color: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 12px 24px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.15s;
+    }
+    .loader-form button:hover {
+      background-color: var(--accent-hover);
+    }
+
+    /* Video Player Container */
+    .player-card {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+    .video-wrapper {
+      width: 100%;
+      aspect-ratio: 16/9;
+      background-color: #000;
+      position: relative;
+    }
+    
+    /* Plyr custom overrides to make it sleek & native */
+    .plyr {
+      --plyr-color-main: var(--accent);
+      --plyr-video-background: #000;
+      height: 100%;
+      width: 100%;
+    }
+
+    .status-bar {
+      border-top: 1px solid var(--border-color);
+      padding: 12px 20px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: #0e0e11;
+    }
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--text-muted);
+    }
+    .status-dot.active {
+      background-color: #10b981;
+    }
+
+    /* Resources diagnostics */
+    .resources-list {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
+    .resources-list h3 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .resource-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .resource-row:last-child { margin-bottom: 0; }
+    .resource-label {
+      font-size: 0.75rem;
+      color: #6b7280;
+    }
+    .resource-value {
+      font-size: 0.82rem;
+      font-family: monospace;
+      color: var(--text-main);
+      word-break: break-all;
+      background-color: #050507;
+      padding: 6px 10px;
+      border: 1px solid #1c1c21;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Navigation -->
+    <div class="nav-bar">
+      <a href="/" class="back-link">← Back to Dashboard</a>
+    </div>
+
+    <!-- Header -->
+    <header class="header">
+      <h1>HLS Stream Player</h1>
+      <p>Minimalist production preview player supporting manual quality controls and dynamic posters</p>
+    </header>
+
+    <!-- URL form -->
+    <section class="stream-loader">
+      <form class="loader-form" id="streamForm">
+        <div class="input-wrap">
+          <input type="url" id="streamUrl" placeholder="Enter HLS master.m3u8 URL" required>
+        </div>
+        <button type="submit">Load Stream</button>
+      </form>
+    </section>
+
+    <!-- Player Card -->
+    <section class="player-card">
+      <div class="video-wrapper">
+        <video id="videoPlayer" playsinline controls></video>
+      </div>
+      <div class="status-bar">
+        <div class="status-indicator">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText">No stream loaded</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Resources Info -->
+    <section class="resources-list">
+      <h3>Deduced Resources</h3>
+      <div class="resource-row">
+        <span class="resource-label">Resolved Poster (thumbnail.jpg)</span>
+        <div class="resource-value" id="resolvedPoster">None</div>
+      </div>
+      <div class="resource-row">
+        <span class="resource-label">Active HLS Stream Url</span>
+        <div class="resource-value" id="resolvedPlaylist">None</div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const form = document.getElementById('streamForm');
+    const streamInput = document.getElementById('streamUrl');
+    const video = document.getElementById('videoPlayer');
+    const statusText = document.getElementById('statusText');
+    const statusDot = document.getElementById('statusDot');
+    const resolvedPosterText = document.getElementById('resolvedPoster');
+    const resolvedPlaylistText = document.getElementById('resolvedPlaylist');
+    
+    let player = null;
+    let hls = null;
+
+    // Load stream URL from parameters if present on load
+    window.addEventListener('DOMContentLoaded', () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const streamUrl = urlParams.get('url');
+      if (streamUrl) {
+        streamInput.value = streamUrl;
+        loadHlsStream(streamUrl);
+      }
+    });
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const url = streamInput.value.trim();
+      if (url) {
+        loadHlsStream(url);
+        // Sync URL query params without reloading
+        const newUrl = new URL(window.location);
+        newUrl.searchParams.set('url', url);
+        window.history.pushState({}, '', newUrl);
+      }
+    });
+
+    function loadHlsStream(url) {
+      statusText.textContent = 'Resolving media files...';
+      statusDot.classList.remove('active');
+
+      // 1. Resolve poster path (thumbnail.jpg) relative to master.m3u8 folder
+      let posterUrl = '';
+      try {
+        const urlObj = new URL(url);
+        const pathSegments = urlObj.pathname.split('/');
+        pathSegments.pop(); // remove master.m3u8
+        pathSegments.push('thumbnail.jpg');
+        urlObj.pathname = pathSegments.join('/');
+        posterUrl = urlObj.toString();
+        
+        video.setAttribute('poster', posterUrl);
+        resolvedPosterText.textContent = posterUrl;
+      } catch (err) {
+        resolvedPosterText.textContent = 'Unable to resolve poster';
+      }
+
+      resolvedPlaylistText.textContent = url;
+
+      // 2. Clear out any running Hls / Plyr instances
+      if (player) {
+        player.destroy();
+        player = null;
+      }
+      if (hls) {
+        hls.destroy();
+        hls = null;
+      }
+
+      // 3. Initiate Player Setup (NO AUTOPLAY)
+      if (Hls.isSupported()) {
+        hls = new Hls();
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        
+        hls.on(Hls.Events.MANIFEST_PARSED, function () {
+          // Generate quality options from levels returned by manifest
+          const availableQualities = hls.levels.map((l) => l.height).filter(h => h > 0);
+          
+          // Add '0' for Auto mode selection
+          availableQualities.unshift(0);
+
+          player = new Plyr(video, {
+            autoplay: false, // Force Autoplay OFF
+            quality: {
+              default: 0,
+              options: availableQualities,
+              forced: true,
+              onChange: (newQuality) => {
+                if (newQuality === 0) {
+                  hls.currentLevel = -1; // Auto select resolution
+                  statusText.textContent = 'Stream active — Auto quality mode';
+                } else {
+                  hls.levels.forEach((level, levelIndex) => {
+                    if (level.height === newQuality) {
+                      hls.currentLevel = levelIndex;
+                      statusText.textContent = `Stream active — Fixed ${newQuality}p quality`;
+                    }
+                  });
+                }
+              }
+            },
+            controls: [
+              'play-large', 'play', 'progress', 'current-time', 
+              'mute', 'volume', 'settings', 'fullscreen'
+            ]
+          });
+
+          statusText.textContent = `Manifest parsed. Stream ready (${availableQualities.length - 1} resolution tiers).`;
+          statusDot.classList.add('active');
+        });
+
+        hls.on(Hls.Events.ERROR, function (event, data) {
+          if (data.fatal) {
+            statusText.textContent = 'Playback error: check URL & R2 CORS credentials';
+            statusDot.classList.remove('active');
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native fallback (Safari / iOS)
+        video.src = url;
+        player = new Plyr(video, {
+          autoplay: false, // Force Autoplay OFF
+          controls: [
+            'play-large', 'play', 'progress', 'current-time', 
+            'mute', 'volume', 'fullscreen'
+          ]
+        });
+        statusText.textContent = 'Stream active (Safari Native HLS)';
+        statusDot.classList.add('active');
+      } else {
+        statusText.textContent = 'Browser HLS playback not supported';
+      }
+    }
+  </script>
+</body>
+</html>
