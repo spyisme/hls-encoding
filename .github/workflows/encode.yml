@@ -59,10 +59,7 @@ jobs:
             FILE_NAME="${{ github.event.client_payload.gdrive_file_name }}"
             echo "Downloading Google Drive file: $FILE_ID ($FILE_NAME)"
 
-            rclone copy "gdrive:$FILE_ID" ./gdrive_download \
-              --drive-root-folder-id="" \
-              --transfers 4 \
-              -P
+            rclone backend copyid gdrive: "$FILE_ID" ./gdrive_download -P
 
             # Rename the downloaded file to input.mp4
             DOWNLOADED=$(find ./gdrive_download -type f | head -1)
