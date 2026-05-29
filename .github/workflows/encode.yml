@@ -36,11 +36,49 @@ jobs:
           secret_access_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
           endpoint = ${{ secrets.R2_ENDPOINT }}
           acl = private
+
+          [gdrive]
+          type = drive
+          service_account_file = /tmp/gdrive-sa.json
+          scope = drive.readonly
           EOF
+
+      - name: Setup Google Drive Service Account
+        if: github.event.client_payload.source_type == 'gdrive'
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > /tmp/gdrive-sa.json
+          chmod 600 /tmp/gdrive-sa.json
 
       - name: Download Processing Target File
         run: |
-          curl -L "${{ github.event.client_payload.video_url }}" -o input.mp4
+          SOURCE_TYPE="${{ github.event.client_payload.source_type }}"
+          echo "Source type: $SOURCE_TYPE"
+
+          if [ "$SOURCE_TYPE" = "gdrive" ]; then
+            FILE_ID="${{ github.event.client_payload.gdrive_file_id }}"
+            FILE_NAME="${{ github.event.client_payload.gdrive_file_name }}"
+            echo "Downloading Google Drive file: $FILE_ID ($FILE_NAME)"
+
+            rclone copy "gdrive:$FILE_ID" ./gdrive_download \
+              --drive-root-folder-id="" \
+              --transfers 4 \
+              -P
+
+            # Rename the downloaded file to input.mp4
+            DOWNLOADED=$(find ./gdrive_download -type f | head -1)
+            if [ -z "$DOWNLOADED" ]; then
+              echo "ERROR: rclone download produced no files"
+              exit 1
+            fi
+            echo "Downloaded file: $DOWNLOADED"
+            mv "$DOWNLOADED" input.mp4
+            rm -rf ./gdrive_download
+          else
+            echo "Downloading via direct URL..."
+            curl -L "${{ github.event.client_payload.video_url }}" -o input.mp4
+          fi
+
+          ls -lh input.mp4
 
       - name: Run Dedicated Transcoder
         id: transcode
@@ -139,6 +177,10 @@ jobs:
             --checkers 32 \
             --fast-list \
             -P
+
+      - name: Cleanup Service Account
+        if: always() && github.event.client_payload.source_type == 'gdrive'
+        run: rm -f /tmp/gdrive-sa.json
 
       - name: Trigger Finished Webhook callback
         if: always()
