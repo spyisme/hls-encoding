@@ -19,8 +19,9 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg python3-pip
           curl https://rclone.org/install.sh | sudo bash
+          pip3 install yt-dlp
 
       - name: Install Node Dependencies
         run: npm install fluent-ffmpeg
@@ -70,6 +71,22 @@ jobs:
             echo "Downloaded file: $DOWNLOADED"
             mv "$DOWNLOADED" input.mp4
             rm -rf ./gdrive_download
+
+          elif [ "$SOURCE_TYPE" = "zoom" ]; then
+            ZOOM_URL="${{ github.event.client_payload.zoom_url }}"
+            echo "Downloading Zoom recording: $ZOOM_URL"
+
+            yt-dlp \
+              --no-playlist \
+              --merge-output-format mp4 \
+              -o "input.mp4" \
+              "$ZOOM_URL"
+
+            if [ ! -f input.mp4 ]; then
+              echo "ERROR: yt-dlp did not produce input.mp4"
+              exit 1
+            fi
+
           else
             echo "Downloading via direct URL..."
             curl -L "${{ github.event.client_payload.video_url }}" -o input.mp4
