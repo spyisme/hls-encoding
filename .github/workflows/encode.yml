@@ -1,4 +1,4 @@
-name: Distributed HLS Cluster Encoder
+name: Distributed HLS Cluster Encoder (Using AES)
 
 on:
   repository_dispatch:
@@ -8,6 +8,21 @@ jobs:
   build-and-transcode:
     runs-on: ubuntu-latest
     steps:
+      - name: Validate Required Secrets
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          for var in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET_NAME; do
+            if [ -z "${!var}" ]; then
+              echo "❌ CRITICAL: Missing GitHub Secret: $var"
+              exit 1
+            fi
+          done
+          echo "✅ All required repository secrets are present."
+
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
@@ -16,27 +31,44 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install System Dependencies
+      - name: Install System Dependencies (FFmpeg, Rclone, yt-dlp)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg python3-pip
-          curl https://rclone.org/install.sh | sudo bash
-          pip3 install yt-dlp
+          sudo apt-get update -q
+          sudo apt-get install -y ffmpeg
+          curl -s https://rclone.org/install.sh | sudo bash
+          sudo curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
 
       - name: Install Node Dependencies
-        run: npm install fluent-ffmpeg
+        run: |
+          npm init -y
+          npm install fluent-ffmpeg
 
       - name: Configure Rclone Credentials
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
           mkdir -p ~/.config/rclone
           cat <<EOF > ~/.config/rclone/rclone.conf
           [r2]
           type = s3
           provider = Cloudflare
-          access_key_id = ${{ secrets.R2_ACCESS_KEY_ID }}
-          secret_access_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          endpoint = ${{ secrets.R2_ENDPOINT }}
+          access_key_id = $R2_ACCESS_KEY_ID
+          secret_access_key = $R2_SECRET_ACCESS_KEY
+          endpoint = $R2_ENDPOINT
           acl = private
+          EOF
+
+      - name: Configure GDrive Credentials (If needed)
+        if: github.event.client_payload.source_type == 'gdrive'
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "$GDRIVE_SA_JSON" > /tmp/gdrive-sa.json
+          chmod 600 /tmp/gdrive-sa.json
+          cat <<EOF >> ~/.config/rclone/rclone.conf
 
           [gdrive]
           type = drive
@@ -44,79 +76,68 @@ jobs:
           scope = drive.readonly
           EOF
 
-      - name: Setup Google Drive Service Account
-        if: github.event.client_payload.source_type == 'gdrive'
-        run: |
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > /tmp/gdrive-sa.json
-          chmod 600 /tmp/gdrive-sa.json
-
       - name: Download Processing Target File
+        env:
+          SOURCE_TYPE: ${{ github.event.client_payload.source_type }}
+          FILE_ID: ${{ github.event.client_payload.gdrive_file_id }}
+          ZOOM_URL: ${{ github.event.client_payload.zoom_url }}
+          VIDEO_URL: ${{ github.event.client_payload.video_url }}
         run: |
-          SOURCE_TYPE="${{ github.event.client_payload.source_type }}"
-          echo "Source type: $SOURCE_TYPE"
-
           if [ "$SOURCE_TYPE" = "gdrive" ]; then
-            FILE_ID="${{ github.event.client_payload.gdrive_file_id }}"
-            FILE_NAME="${{ github.event.client_payload.gdrive_file_name }}"
-            echo "Downloading Google Drive file: $FILE_ID ($FILE_NAME)"
-
             rclone backend copyid gdrive: "$FILE_ID" ./gdrive_download -P
-
-            # Rename the downloaded file to input.mp4
-            DOWNLOADED=$(find ./gdrive_download -type f | head -1)
-            if [ -z "$DOWNLOADED" ]; then
-              echo "ERROR: rclone download produced no files"
-              exit 1
-            fi
-            echo "Downloaded file: $DOWNLOADED"
-            mv "$DOWNLOADED" input.mp4
+            mv ./gdrive_download/* input.mp4
             rm -rf ./gdrive_download
-
+          
           elif [ "$SOURCE_TYPE" = "zoom" ]; then
-            ZOOM_URL="${{ github.event.client_payload.zoom_url }}"
-            echo "Downloading Zoom recording: $ZOOM_URL"
-
-            yt-dlp \
-              --no-playlist \
-              --merge-output-format mp4 \
-              -o "input.mp4" \
-              "$ZOOM_URL"
-
-            if [ ! -f input.mp4 ]; then
-              echo "ERROR: yt-dlp did not produce input.mp4"
-              exit 1
-            fi
-
+            yt-dlp --no-playlist --merge-output-format mp4 -o "input.mp4" "$ZOOM_URL"
+          
           else
-            echo "Downloading via direct URL..."
-            curl -L "${{ github.event.client_payload.video_url }}" -o input.mp4
+            curl -L "$VIDEO_URL" -o input.mp4
           fi
 
-          ls -lh input.mp4
+          if [ ! -f input.mp4 ]; then
+            echo "❌ ERROR: File download failed. input.mp4 not found."
+            exit 1
+          fi
 
-      - name: Run Dedicated Transcoder
+      - name: Run Transcoder with AES-128 Encryption
         id: transcode
         env:
-          OUTPUT_NAME: ${{ github.event.client_payload.output_name }}
+          KEY_URL: ${{ github.event.client_payload.key_url }}
         run: |
           cat <<'EOF' > run-encode.js
           const ffmpeg = require('fluent-ffmpeg');
           const fs = require('fs');
           const path = require('path');
+          const crypto = require('crypto');
           
           const input = 'input.mp4';
           const outDir = './output/media';
+          const keyUrl = process.env.KEY_URL || 'fallback.key';
+          
           fs.mkdirSync(outDir, { recursive: true });
 
+          // Generate AES-128 Key
+          const rawKey = crypto.randomBytes(16);
+          const hexKey = rawKey.toString('hex');
+          const keyPath = path.resolve('enc.key');
+          const keyInfoPath = path.resolve('key_info.txt');
+
+          // Save Key Locally & Write Key Info for FFmpeg
+          fs.writeFileSync(keyPath, rawKey);
+          fs.writeFileSync(keyInfoPath, `${keyUrl}\n${keyPath}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `VIDEO_HEX_KEY=${hexKey}\n`);
+
           ffmpeg.ffprobe(input, (err, metadata) => {
-            if (err) { console.error(err); process.exit(1); }
+            if (err) { console.error("FFprobe Error:", err); process.exit(1); }
             
             const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-            const nativeHeight = videoStream.height;
-            const duration = metadata.format.duration;
+            if (!videoStream) { console.error("No video stream found!"); process.exit(1); }
+
+            const nativeHeight = videoStream.height || 720;
+            const duration = metadata.format.duration || 10;
             
-            console.log(`Detected source video height: ${nativeHeight}p`);
-            
+            // Generate Thumbnail
             const randomTime = Math.floor(Math.random() * (duration * 0.8)) + (duration * 0.1);
             ffmpeg(input).screenshots({
               timestamps: [randomTime],
@@ -135,42 +156,51 @@ jobs:
 
               tiersConfig.forEach(tier => {
                 if (nativeHeight >= tier.maxTarget) {
-                  console.log(`Configuring encoding stream for: ${tier.name}`);
                   command.output(path.join(outDir, `${tier.name}.m3u8`))
-                    .videoCodec('libx264')
-                    .audioCodec('aac')
-                    .size(tier.res)
-                    .videoBitrate(tier.vBit)
+                    .videoCodec('libx264').audioCodec('aac').size(tier.res).videoBitrate(tier.vBit)
                     .addOptions([
-                      '-preset veryfast', 
-                      '-g 60', 
-                      '-hls_time 6', 
-                      '-hls_playlist_type vod', 
+                      '-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod',
+                      `-hls_key_info_file ${keyInfoPath}`,
                       `-hls_segment_filename ${outDir}/${tier.name}_%03d.ts`
                     ]);
                   activeTiers.push(tier);
                 }
               });
 
+              // Fallback if video is smaller than 480p
               if (activeTiers.length === 0) {
                 const width = videoStream.width || Math.round((nativeHeight * 16) / 9);
-                const height = nativeHeight || 360;
-                const fallbackName = `${height}p`;
+                const fallbackName = `${nativeHeight}p`;
                 command.output(path.join(outDir, `${fallbackName}.m3u8`))
                   .videoCodec('libx264').audioCodec('aac')
-                  .addOptions(['-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod', `-hls_segment_filename ${outDir}/${fallbackName}_%03d.ts`]);
-                activeTiers.push({ res: `${width}x${height}`, vBit: '500k', name: fallbackName });
+                  .addOptions([
+                    '-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod',
+                    `-hls_key_info_file ${keyInfoPath}`,
+                    `-hls_segment_filename ${outDir}/${fallbackName}_%03d.ts`
+                  ]);
+                activeTiers.push({ res: `${width}x${nativeHeight}`, vBit: '500k', name: fallbackName });
               }
 
-              command.on('progress', (p) => console.log(`PROGRESS_MARKER:${p.percent ? p.percent.toFixed(0) : 0}`))
+              // Run Encoding
+              command.on('progress', (p) => process.stdout.write(`.`))
               .on('end', () => {
+                console.log("\n✅ Encoding Complete!");
+                
+                // Write Master Playlist
                 let master = `#EXTM3U\n#EXT-X-VERSION:3\n`;
                 activeTiers.forEach(t => {
                   master += `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(t.vBit) * 1000},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
                 });
                 fs.writeFileSync('./output/master.m3u8', master);
-                console.log("TRANSCODE_SUCCESSFUL");
-              }).on('error', (err) => { console.error(err); process.exit(1); }).run();
+
+                // Securely delete AES key so it isn't uploaded
+                if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
+                if (fs.existsSync(keyInfoPath)) fs.unlinkSync(keyInfoPath);
+
+              }).on('error', (err) => { 
+                console.error("FFmpeg Error:", err); 
+                process.exit(1); 
+              }).run();
             });
           });
           EOF
@@ -180,25 +210,45 @@ jobs:
           END_TIME=$(date +%s)
           echo "ELAPSED_SECONDS=$((END_TIME - START_TIME))" >> $GITHUB_ENV
 
-      - name: Deploy Assets to Cloudflare R2 via Rclone
+      - name: Deploy Assets to Cloudflare R2
         env:
           PARENT_FOLDER: ${{ github.event.client_payload.parent_folder }}
           OUTPUT_NAME: ${{ github.event.client_payload.output_name }}
           BUCKET: ${{ secrets.R2_BUCKET_NAME }}
         run: |
-          rclone copy ./output r2:$BUCKET/$PARENT_FOLDER/$OUTPUT_NAME \
-            --transfers 16 \
-            --checkers 32 \
-            --fast-list \
-            -P
+          # Handle empty parent_folder cleanly
+          if [ -n "$PARENT_FOLDER" ]; then
+            TARGET_PATH="$BUCKET/$PARENT_FOLDER/$OUTPUT_NAME"
+          else
+            TARGET_PATH="$BUCKET/$OUTPUT_NAME"
+          fi
+
+          rclone copy ./output "r2:$TARGET_PATH" \
+            --transfers 16 --checkers 32 --fast-list -P
 
       - name: Cleanup Service Account
         if: always() && github.event.client_payload.source_type == 'gdrive'
         run: rm -f /tmp/gdrive-sa.json
 
-      - name: Trigger Finished Webhook callback
+      - name: Trigger Webhook Callback
         if: always()
+        env:
+          WEBHOOK_URL: ${{ github.event.client_payload.callback_webhook }}
+          OUTPUT_NAME: ${{ github.event.client_payload.output_name }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_webhook }}" \
-            -H "Content-Type: application/json" \
-            -d '{"status": "${{ job.status }}", "output_name": "${{ github.event.client_payload.output_name }}", "time_taken_seconds": "${{ env.ELAPSED_SECONDS }}"}'
+          if [ -n "$WEBHOOK_URL" ]; then
+            # Convert GitHub's "Success"/"Failure" to lowercase for APIs
+            STATUS=$(echo "$JOB_STATUS" | tr '[:upper:]' '[:lower:]')
+            
+            curl -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"status\": \"$STATUS\",
+                \"output_name\": \"$OUTPUT_NAME\",
+                \"time_taken_seconds\": \"${ELAPSED_SECONDS:-0}\",
+                \"hex_key\": \"${VIDEO_HEX_KEY:-}\"
+              }"
+          else
+            echo "No webhook URL provided. Skipping callback."
+          fi
