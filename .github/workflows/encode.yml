@@ -106,105 +106,73 @@ jobs:
           KEY_URL: ${{ github.event.client_payload.key_url }}
         run: |
           cat <<'EOF' > run-encode.js
-          const ffmpeg = require('fluent-ffmpeg');
+          const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
           const crypto = require('crypto');
-          
+
           const input = 'input.mp4';
           const outDir = './output/media';
           const keyUrl = process.env.KEY_URL || 'fallback.key';
-          
           fs.mkdirSync(outDir, { recursive: true });
 
-          // Generate AES-128 Key
+          // 1. Generate AES-128 Key
           const rawKey = crypto.randomBytes(16);
           const hexKey = rawKey.toString('hex');
           const keyPath = path.resolve('enc.key');
           const keyInfoPath = path.resolve('key_info.txt');
 
-          // Save Key Locally & Write Key Info for FFmpeg
           fs.writeFileSync(keyPath, rawKey);
           fs.writeFileSync(keyInfoPath, `${keyUrl}\n${keyPath}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `VIDEO_HEX_KEY=${hexKey}\n`);
 
-          ffmpeg.ffprobe(input, (err, metadata) => {
-            if (err) { console.error("FFprobe Error:", err); process.exit(1); }
-            
-            const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-            if (!videoStream) { console.error("No video stream found!"); process.exit(1); }
+          // 2. Ultra-Fast Thumbnail Generation
+          try {
+            execSync(`ffmpeg -ss 00:02:00 -i "${input}" -vframes 1 -q:v 2 ./output/thumbnail.jpg -y`, { stdio: 'ignore' });
+          } catch (e) {
+            execSync(`ffmpeg -i "${input}" -vframes 1 -q:v 2 ./output/thumbnail.jpg -y`, { stdio: 'ignore' });
+          }
 
-            const nativeHeight = videoStream.height || 720;
-            const duration = metadata.format.duration || 10;
-            
-            // Generate Thumbnail
-            const randomTime = Math.floor(Math.random() * (duration * 0.8)) + (duration * 0.1);
-            ffmpeg(input).screenshots({
-              timestamps: [randomTime],
-              filename: 'thumbnail.jpg',
-              folder: './output',
-              size: nativeHeight >= 1080 ? '1920x1080' : '1280x720'
-            }).on('end', () => {
-              
-              const command = ffmpeg(input);
-              const activeTiers = [];
-              const tiersConfig = [
-                { maxTarget: 480, res: '854x480', vBit: '800k', name: '480p' },
-                { maxTarget: 720, res: '1280x720', vBit: '2800k', name: '720p' },
-                { maxTarget: 1080, res: '1920x1080', vBit: '5000k', name: '1080p' }
-              ];
-
-              tiersConfig.forEach(tier => {
-                if (nativeHeight >= tier.maxTarget) {
-                  command.output(path.join(outDir, `${tier.name}.m3u8`))
-                    .videoCodec('libx264').audioCodec('aac').size(tier.res).videoBitrate(tier.vBit)
-                    .addOptions([
-                      '-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod',
-                      `-hls_key_info_file ${keyInfoPath}`,
-                      `-hls_segment_filename ${outDir}/${tier.name}_%03d.ts`
-                    ]);
-                  activeTiers.push(tier);
-                }
-              });
-
-              // Fallback if video is smaller than 480p
-              if (activeTiers.length === 0) {
-                const width = videoStream.width || Math.round((nativeHeight * 16) / 9);
-                const fallbackName = `${nativeHeight}p`;
-                command.output(path.join(outDir, `${fallbackName}.m3u8`))
-                  .videoCodec('libx264').audioCodec('aac')
-                  .addOptions([
-                    '-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod',
-                    `-hls_key_info_file ${keyInfoPath}`,
-                    `-hls_segment_filename ${outDir}/${fallbackName}_%03d.ts`
-                  ]);
-                activeTiers.push({ res: `${width}x${nativeHeight}`, vBit: '500k', name: fallbackName });
-              }
-
-              // Run Encoding
-              command.on('progress', (p) => process.stdout.write(`.`))
-              .on('end', () => {
-                console.log("\n✅ Encoding Complete!");
-                
-                // Write Master Playlist
-                let master = `#EXTM3U\n#EXT-X-VERSION:3\n`;
-                activeTiers.forEach(t => {
-                  master += `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(t.vBit) * 1000},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
-                });
-                fs.writeFileSync('./output/master.m3u8', master);
-
-                // Securely delete AES key so it isn't uploaded
-                if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
-                if (fs.existsSync(keyInfoPath)) fs.unlinkSync(keyInfoPath);
-
-              }).on('error', (err) => { 
-                console.error("FFmpeg Error:", err); 
-                process.exit(1); 
-              }).run();
-            });
-          });
-          EOF
+          // 3. Single-Pass High-Speed Multi-Variant Transcode
+          console.log("Starting 1-Pass Multi-Quality Transcode...");
           
+          const ffmpegCmd = `ffmpeg -threads 0 -i "${input}" \\
+            -filter_complex "[0:v]split=3[v1][v2][v3]; \\
+              [v1]scale=w=1920:h=1080:force_original_aspect_ratio=decrease[v1out]; \\
+              [v2]scale=w=1280:h=720:force_original_aspect_ratio=decrease[v2out]; \\
+              [v3]scale=w=854:h=480:force_original_aspect_ratio=decrease[v3out]" \\
+            -map "[v1out]" -c:v:0 libx264 -preset superfast -crf 23 -maxrate 4500k -bufsize 9000k \\
+            -map "[v2out]" -c:v:1 libx264 -preset superfast -crf 24 -maxrate 2500k -bufsize 5000k \\
+            -map "[v3out]" -c:v:2 libx264 -preset superfast -crf 26 -maxrate 900k -bufsize 1800k \\
+            -map 0:a -c:a:0 aac -b:a:0 128k \\
+            -map 0:a -c:a:1 aac -b:a:1 96k \\
+            -map 0:a -c:a:2 aac -b:a:2 64k \\
+            -f hls \\
+            -hls_time 6 \\
+            -hls_playlist_type vod \\
+            -hls_key_info_file "${keyInfoPath}" \\
+            -hls_segment_filename "${outDir}/%v_%03d.ts" \\
+            -master_pl_name master.m3u8 \\
+            -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p" \\
+            "${outDir}/%v.m3u8"`;
+
+          try {
+            execSync(ffmpegCmd, { stdio: 'inherit' });
+            
+            // Move master.m3u8 to output root
+            fs.renameSync(path.join(outDir, 'master.m3u8'), './output/master.m3u8');
+
+            // Secure local key cleanup
+            if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
+            if (fs.existsSync(keyInfoPath)) fs.unlinkSync(keyInfoPath);
+
+            console.log("\n✅ Transcode and Packaging Complete!");
+          } catch (err) {
+            console.error("FFmpeg execution failed:", err);
+            process.exit(1);
+          }
+          EOF
+
           START_TIME=$(date +%s)
           node run-encode.js
           END_TIME=$(date +%s)
