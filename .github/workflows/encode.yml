@@ -99,13 +99,14 @@ jobs:
             echo "❌ ERROR: File download failed. input.mp4 not found."
             exit 1
           fi
+
       - name: Run Transcoder with AES-128 Encryption
         id: transcode
         env:
           KEY_URL: ${{ github.event.client_payload.key_url }}
         run: |
           cat <<'EOF' > run-encode.js
-          const { execSync } = require('child_process');
+          const ffmpeg = require('fluent-ffmpeg');
           const fs = require('fs');
           const path = require('path');
           const crypto = require('crypto');
@@ -113,102 +114,97 @@ jobs:
           const input = 'input.mp4';
           const outDir = './output/media';
           const keyUrl = process.env.KEY_URL || 'fallback.key';
+          
           fs.mkdirSync(outDir, { recursive: true });
 
-          // 1. Generate AES-128 Key
+          // Generate AES-128 Key
           const rawKey = crypto.randomBytes(16);
           const hexKey = rawKey.toString('hex');
           const keyPath = path.resolve('enc.key');
           const keyInfoPath = path.resolve('key_info.txt');
 
+          // Save Key Locally & Write Key Info for FFmpeg
           fs.writeFileSync(keyPath, rawKey);
           fs.writeFileSync(keyInfoPath, `${keyUrl}\n${keyPath}\n`);
           fs.appendFileSync(process.env.GITHUB_ENV, `VIDEO_HEX_KEY=${hexKey}\n`);
 
-          // 2. Ultra-Fast Thumbnail Generation
-          try {
-            execSync(`ffmpeg -ss 00:02:00 -i "${input}" -vframes 1 -q:v 2 ./output/thumbnail.jpg -y`, { stdio: 'ignore' });
-          } catch (e) {
-            execSync(`ffmpeg -i "${input}" -vframes 1 -q:v 2 ./output/thumbnail.jpg -y`, { stdio: 'ignore' });
-          }
-
-          // 3. Fast Probe for Native Height
-          let nativeHeight = 1080;
-          try {
-            const probeResult = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=height -of default=nw=1:nk=1 "${input}"`).toString().trim();
-            nativeHeight = parseInt(probeResult, 10) || 1080;
-            console.log(`📏 Detected native video height: ${nativeHeight}p`);
-          } catch (e) {
-            console.warn("⚠️ Probe failed, defaulting to 1080p pipeline max.");
-          }
-
-          // 4. Dynamically Build Target Tiers
-          const activeTiers = [];
-          if (nativeHeight >= 1080) {
-            activeTiers.push({ name: '1080p', h: 1080, w: 1920, vb: '4500k', buf: '9000k', ab: '128k', crf: 23 });
-          }
-          if (nativeHeight >= 720) {
-            activeTiers.push({ name: '720p', h: 720, w: 1280, vb: '2500k', buf: '5000k', ab: '96k', crf: 24 });
-          }
-          // Always include at least 480p (or native if it's smaller than 480p)
-          activeTiers.push({ name: '480p', h: 480, w: 854, vb: '900k', buf: '1800k', ab: '64k', crf: 26 });
-
-          // 5. Construct FFmpeg Command Strings
-          const splitCount = activeTiers.length;
-          let filterComplex = "";
-          let videoMaps = "";
-          let audioMaps = "";
-          let streamMap = "";
-
-          if (splitCount > 1) {
-            filterComplex += `[0:v]split=${splitCount}`;
-            for (let i = 0; i < splitCount; i++) filterComplex += `[v${i}]`;
-            filterComplex += `; `;
-            for (let i = 0; i < splitCount; i++) {
-              filterComplex += `[v${i}]scale=w=${activeTiers[i].w}:h=${activeTiers[i].h}:force_original_aspect_ratio=decrease[v${i}out]`;
-              if (i < splitCount - 1) filterComplex += `; `;
-            }
-          } else {
-            // Single output fallback prevents FFmpeg crash on `split=1`
-            filterComplex = `[0:v]scale=w=${activeTiers[0].w}:h=${activeTiers[0].h}:force_original_aspect_ratio=decrease[v0out]`;
-          }
-
-          for (let i = 0; i < splitCount; i++) {
-            videoMaps += `-map "[v${i}out]" -c:v:${i} libx264 -preset superfast -crf ${activeTiers[i].crf} -maxrate ${activeTiers[i].vb} -bufsize ${activeTiers[i].buf} `;
-            audioMaps += `-map 0:a -c:a:${i} aac -b:a:${i} ${activeTiers[i].ab} `;
-            streamMap += `v:${i},a:${i},name:${activeTiers[i].name} `;
-          }
-
-          console.log(`🚀 Starting 1-Pass Transcode for: ${activeTiers.map(t => t.name).join(', ')}...`);
-          
-          const ffmpegCmd = `ffmpeg -threads 0 -i "${input}" \\
-            -filter_complex "${filterComplex}" \\
-            ${videoMaps} \\
-            ${audioMaps} \\
-            -f hls -hls_time 6 -hls_playlist_type vod \\
-            -hls_key_info_file "${keyInfoPath}" \\
-            -hls_segment_filename "${outDir}/%v_%03d.ts" \\
-            -master_pl_name master.m3u8 \\
-            -var_stream_map "${streamMap.trim()}" \\
-            "${outDir}/%v.m3u8"`;
-
-          try {
-            execSync(ffmpegCmd, { stdio: 'inherit' });
+          ffmpeg.ffprobe(input, (err, metadata) => {
+            if (err) { console.error("FFprobe Error:", err); process.exit(1); }
             
-            // Move master.m3u8 to output root
-            fs.renameSync(path.join(outDir, 'master.m3u8'), './output/master.m3u8');
+            const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+            if (!videoStream) { console.error("No video stream found!"); process.exit(1); }
 
-            // Secure local key cleanup
-            if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
-            if (fs.existsSync(keyInfoPath)) fs.unlinkSync(keyInfoPath);
+            const nativeHeight = videoStream.height || 720;
+            const duration = metadata.format.duration || 10;
+            
+            // Generate Thumbnail
+            const randomTime = Math.floor(Math.random() * (duration * 0.8)) + (duration * 0.1);
+            ffmpeg(input).screenshots({
+              timestamps: [randomTime],
+              filename: 'thumbnail.jpg',
+              folder: './output',
+              size: nativeHeight >= 1080 ? '1920x1080' : '1280x720'
+            }).on('end', () => {
+              
+              const command = ffmpeg(input);
+              const activeTiers = [];
+              const tiersConfig = [
+                { maxTarget: 480, res: '854x480', vBit: '800k', name: '480p' },
+                { maxTarget: 720, res: '1280x720', vBit: '2800k', name: '720p' },
+                { maxTarget: 1080, res: '1920x1080', vBit: '5000k', name: '1080p' }
+              ];
 
-            console.log("\n✅ Transcode and Packaging Complete!");
-          } catch (err) {
-            console.error("❌ FFmpeg execution failed:", err);
-            process.exit(1);
-          }
+              tiersConfig.forEach(tier => {
+                if (nativeHeight >= tier.maxTarget) {
+                  command.output(path.join(outDir, `${tier.name}.m3u8`))
+                    .videoCodec('libx264').audioCodec('aac').size(tier.res).videoBitrate(tier.vBit)
+                    .addOptions([
+                      '-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod',
+                      `-hls_key_info_file ${keyInfoPath}`,
+                      `-hls_segment_filename ${outDir}/${tier.name}_%03d.ts`
+                    ]);
+                  activeTiers.push(tier);
+                }
+              });
+
+              // Fallback if video is smaller than 480p
+              if (activeTiers.length === 0) {
+                const width = videoStream.width || Math.round((nativeHeight * 16) / 9);
+                const fallbackName = `${nativeHeight}p`;
+                command.output(path.join(outDir, `${fallbackName}.m3u8`))
+                  .videoCodec('libx264').audioCodec('aac')
+                  .addOptions([
+                    '-preset veryfast', '-g 60', '-hls_time 6', '-hls_playlist_type vod',
+                    `-hls_key_info_file ${keyInfoPath}`,
+                    `-hls_segment_filename ${outDir}/${fallbackName}_%03d.ts`
+                  ]);
+                activeTiers.push({ res: `${width}x${nativeHeight}`, vBit: '500k', name: fallbackName });
+              }
+
+              // Run Encoding
+              command.on('progress', (p) => process.stdout.write(`.`))
+              .on('end', () => {
+                console.log("\n✅ Encoding Complete!");
+                
+                // Write Master Playlist
+                let master = `#EXTM3U\n#EXT-X-VERSION:3\n`;
+                activeTiers.forEach(t => {
+                  master += `#EXT-X-STREAM-INF:BANDWIDTH=${parseInt(t.vBit) * 1000},RESOLUTION=${t.res}\nmedia/${t.name}.m3u8\n`;
+                });
+                fs.writeFileSync('./output/master.m3u8', master);
+
+                // Securely delete AES key so it isn't uploaded
+                if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
+                if (fs.existsSync(keyInfoPath)) fs.unlinkSync(keyInfoPath);
+
+              }).on('error', (err) => { 
+                console.error("FFmpeg Error:", err); 
+                process.exit(1); 
+              }).run();
+            });
+          });
           EOF
-
+          
           START_TIME=$(date +%s)
           node run-encode.js
           END_TIME=$(date +%s)
