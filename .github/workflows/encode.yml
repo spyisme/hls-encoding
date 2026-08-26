@@ -99,7 +99,6 @@ jobs:
             echo "❌ ERROR: File download failed. input.mp4 not found."
             exit 1
           fi
-
       - name: Run Transcoder with AES-128 Encryption
         id: transcode
         env:
@@ -110,7 +109,7 @@ jobs:
           const fs = require('fs');
           const path = require('path');
           const crypto = require('crypto');
-
+          
           const input = 'input.mp4';
           const outDir = './output/media';
           const keyUrl = process.env.KEY_URL || 'fallback.key';
@@ -133,27 +132,64 @@ jobs:
             execSync(`ffmpeg -i "${input}" -vframes 1 -q:v 2 ./output/thumbnail.jpg -y`, { stdio: 'ignore' });
           }
 
-          // 3. Single-Pass High-Speed Multi-Variant Transcode
-          console.log("Starting 1-Pass Multi-Quality Transcode...");
+          // 3. Fast Probe for Native Height
+          let nativeHeight = 1080;
+          try {
+            const probeResult = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=height -of default=nw=1:nk=1 "${input}"`).toString().trim();
+            nativeHeight = parseInt(probeResult, 10) || 1080;
+            console.log(`📏 Detected native video height: ${nativeHeight}p`);
+          } catch (e) {
+            console.warn("⚠️ Probe failed, defaulting to 1080p pipeline max.");
+          }
+
+          // 4. Dynamically Build Target Tiers
+          const activeTiers = [];
+          if (nativeHeight >= 1080) {
+            activeTiers.push({ name: '1080p', h: 1080, w: 1920, vb: '4500k', buf: '9000k', ab: '128k', crf: 23 });
+          }
+          if (nativeHeight >= 720) {
+            activeTiers.push({ name: '720p', h: 720, w: 1280, vb: '2500k', buf: '5000k', ab: '96k', crf: 24 });
+          }
+          // Always include at least 480p (or native if it's smaller than 480p)
+          activeTiers.push({ name: '480p', h: 480, w: 854, vb: '900k', buf: '1800k', ab: '64k', crf: 26 });
+
+          // 5. Construct FFmpeg Command Strings
+          const splitCount = activeTiers.length;
+          let filterComplex = "";
+          let videoMaps = "";
+          let audioMaps = "";
+          let streamMap = "";
+
+          if (splitCount > 1) {
+            filterComplex += `[0:v]split=${splitCount}`;
+            for (let i = 0; i < splitCount; i++) filterComplex += `[v${i}]`;
+            filterComplex += `; `;
+            for (let i = 0; i < splitCount; i++) {
+              filterComplex += `[v${i}]scale=w=${activeTiers[i].w}:h=${activeTiers[i].h}:force_original_aspect_ratio=decrease[v${i}out]`;
+              if (i < splitCount - 1) filterComplex += `; `;
+            }
+          } else {
+            // Single output fallback prevents FFmpeg crash on `split=1`
+            filterComplex = `[0:v]scale=w=${activeTiers[0].w}:h=${activeTiers[0].h}:force_original_aspect_ratio=decrease[v0out]`;
+          }
+
+          for (let i = 0; i < splitCount; i++) {
+            videoMaps += `-map "[v${i}out]" -c:v:${i} libx264 -preset superfast -crf ${activeTiers[i].crf} -maxrate ${activeTiers[i].vb} -bufsize ${activeTiers[i].buf} `;
+            audioMaps += `-map 0:a -c:a:${i} aac -b:a:${i} ${activeTiers[i].ab} `;
+            streamMap += `v:${i},a:${i},name:${activeTiers[i].name} `;
+          }
+
+          console.log(`🚀 Starting 1-Pass Transcode for: ${activeTiers.map(t => t.name).join(', ')}...`);
           
           const ffmpegCmd = `ffmpeg -threads 0 -i "${input}" \\
-            -filter_complex "[0:v]split=3[v1][v2][v3]; \\
-              [v1]scale=w=1920:h=1080:force_original_aspect_ratio=decrease[v1out]; \\
-              [v2]scale=w=1280:h=720:force_original_aspect_ratio=decrease[v2out]; \\
-              [v3]scale=w=854:h=480:force_original_aspect_ratio=decrease[v3out]" \\
-            -map "[v1out]" -c:v:0 libx264 -preset superfast -crf 23 -maxrate 4500k -bufsize 9000k \\
-            -map "[v2out]" -c:v:1 libx264 -preset superfast -crf 24 -maxrate 2500k -bufsize 5000k \\
-            -map "[v3out]" -c:v:2 libx264 -preset superfast -crf 26 -maxrate 900k -bufsize 1800k \\
-            -map 0:a -c:a:0 aac -b:a:0 128k \\
-            -map 0:a -c:a:1 aac -b:a:1 96k \\
-            -map 0:a -c:a:2 aac -b:a:2 64k \\
-            -f hls \\
-            -hls_time 6 \\
-            -hls_playlist_type vod \\
+            -filter_complex "${filterComplex}" \\
+            ${videoMaps} \\
+            ${audioMaps} \\
+            -f hls -hls_time 6 -hls_playlist_type vod \\
             -hls_key_info_file "${keyInfoPath}" \\
             -hls_segment_filename "${outDir}/%v_%03d.ts" \\
             -master_pl_name master.m3u8 \\
-            -var_stream_map "v:0,a:0,name:1080p v:1,a:1,name:720p v:2,a:2,name:480p" \\
+            -var_stream_map "${streamMap.trim()}" \\
             "${outDir}/%v.m3u8"`;
 
           try {
@@ -168,7 +204,7 @@ jobs:
 
             console.log("\n✅ Transcode and Packaging Complete!");
           } catch (err) {
-            console.error("FFmpeg execution failed:", err);
+            console.error("❌ FFmpeg execution failed:", err);
             process.exit(1);
           }
           EOF
