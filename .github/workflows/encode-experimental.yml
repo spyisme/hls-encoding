@@ -1,0 +1,170 @@
+name: Experimental HLS Encoder (Source Only)
+
+on:
+  repository_dispatch:
+    types: [experimental-zoom-encode]
+  workflow_dispatch:
+    inputs:
+      zoom_url:
+        description: 'Zoom recording URL'
+        required: true
+        type: string
+      output_name:
+        description: 'Output folder/name'
+        required: true
+        type: string
+
+jobs:
+  encode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg rclone
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+
+      - name: Configure R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET_TEMP: ${{ secrets.R2_Bucket_Temp }}
+        run: |
+          set -e
+          test -n "$R2_ACCESS_KEY_ID" || { echo "Missing R2_ACCESS_KEY_ID"; exit 1; }
+          test -n "$R2_SECRET_ACCESS_KEY" || { echo "Missing R2_SECRET_ACCESS_KEY"; exit 1; }
+          test -n "$R2_ENDPOINT" || { echo "Missing R2_ENDPOINT"; exit 1; }
+          test -n "$R2_BUCKET_TEMP" || { echo "Missing R2_Bucket_Temp"; exit 1; }
+
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<RCLONE
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = $R2_ACCESS_KEY_ID
+          secret_access_key = $R2_SECRET_ACCESS_KEY
+          endpoint = $R2_ENDPOINT
+          acl = private
+          RCLONE
+
+          echo "R2_BUCKET_TEMP=$R2_BUCKET_TEMP" >> "$GITHUB_ENV"
+
+      - name: Resolve input
+        id: input
+        env:
+          EVENT_ZOOM_URL: ${{ github.event.client_payload.zoom_url }}
+          EVENT_OUTPUT_NAME: ${{ github.event.client_payload.output_name }}
+          DISPATCH_ZOOM_URL: ${{ inputs.zoom_url }}
+          DISPATCH_OUTPUT_NAME: ${{ inputs.output_name }}
+        run: |
+          set -e
+          ZOOM_URL="${EVENT_ZOOM_URL:-$DISPATCH_ZOOM_URL}"
+          OUTPUT_NAME="${EVENT_OUTPUT_NAME:-$DISPATCH_OUTPUT_NAME}"
+
+          test -n "$ZOOM_URL" || { echo "Missing Zoom URL"; exit 1; }
+          test -n "$OUTPUT_NAME" || { echo "Missing output name"; exit 1; }
+
+          echo "zoom_url=$ZOOM_URL" >> "$GITHUB_OUTPUT"
+          echo "output_name=$OUTPUT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Download Zoom source
+        env:
+          ZOOM_URL: ${{ steps.input.outputs.zoom_url }}
+        run: |
+          set -e
+          yt-dlp \
+            --no-playlist \
+            --merge-output-format mp4 \
+            -o source.mp4 \
+            "$ZOOM_URL"
+
+          ffprobe -v error -show_entries format=duration,size,bit_rate \
+            -show_entries stream=index,codec_name,codec_type,width,height,avg_frame_rate \
+            -of default=noprint_wrappers=1 source.mp4
+
+      - name: Generate AES-128 key
+        env:
+          KEY_URL: ${{ github.event.client_payload.key_url || 'http://localhost:5000/key' }}
+        run: |
+          set -e
+          openssl rand 16 > enc.key
+          HEX_KEY=$(xxd -p -c 256 enc.key)
+
+          echo "VIDEO_HEX_KEY=$HEX_KEY" >> "$GITHUB_ENV"
+          echo "KEY_URL=$KEY_URL" >> "$GITHUB_ENV"
+
+          echo "============================================================"
+          echo "TEST AES-128 HEX KEY (copy to local TEST_HEX_KEY):"
+          echo "$HEX_KEY"
+          echo "============================================================"
+          echo "Key URL: $KEY_URL"
+
+          cat > key_info.txt <<KEYINFO
+          $KEY_URL
+          $(pwd)/enc.key
+          $HEX_KEY
+          KEYINFO
+
+      - name: Create source-only encrypted HLS
+        run: |
+          set -e
+          rm -rf hls
+          mkdir -p hls
+
+          ffmpeg -y -hide_banner -i source.mp4 \
+            -map 0:v:0 -map 0:a? \
+            -c:v copy \
+            -c:a aac -b:a 96k -ac 2 \
+            -f hls \
+            -hls_time 6 \
+            -hls_playlist_type vod \
+            -hls_segment_filename 'hls/source_%06d.ts' \
+            -hls_key_info_file key_info.txt \
+            hls/source.m3u8
+
+          cat > hls/master.m3u8 <<MASTER
+          #EXTM3U
+          #EXT-X-VERSION:3
+          #EXT-X-STREAM-INF:BANDWIDTH=5096000,RESOLUTION=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 source.mp4),CODECS="avc1.4d401f,mp4a.40.2"
+          source.m3u8
+          MASTER
+
+          sed -i 's/^[[:space:]]*//' hls/master.m3u8
+          cat hls/master.m3u8
+
+      - name: Upload source-only HLS to R2
+        env:
+          OUTPUT_NAME: ${{ steps.input.outputs.output_name }}
+        run: |
+          set -e
+          DEST="r2:${R2_BUCKET_TEMP}/${OUTPUT_NAME}"
+          rclone copy hls "$DEST" --fast-list --transfers 8 --checkers 16
+
+          echo "Uploaded to: $DEST"
+          echo "Local HLS size:"
+          du -sh hls
+          echo "Input size:"
+          du -h source.mp4
+
+      - name: Summary
+        env:
+          OUTPUT_NAME: ${{ steps.input.outputs.output_name }}
+        run: |
+          echo ""
+          echo "==================== RESULT ===================="
+          echo "R2 bucket: ${R2_BUCKET_TEMP}"
+          echo "Output:    ${OUTPUT_NAME}/"
+          echo "Playlist:  ${OUTPUT_NAME}/master.m3u8"
+          echo "Variants:  SOURCE ONLY"
+          echo "Video:     copied (no video re-encode)"
+          echo "Audio:     AAC 96 kbps stereo"
+          echo "Encryption: AES-128 HLS"
+          echo "Key URL:   ${KEY_URL}"
+          echo "================================================="
