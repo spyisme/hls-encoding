@@ -1,0 +1,82 @@
+name: Zoom to Google Drive
+
+on:
+  repository_dispatch:
+    types: [zoom-to-gdrive]
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rclone
+        run: curl -s https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone (Google Drive)
+        env:
+          GOOGLE_ACCOUNT_JSON: ${{ secrets.GOOGLE_ACCOUNT_JSON }}
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "$GOOGLE_ACCOUNT_JSON" > ~/.config/rclone/rclone.conf
+
+      - name: Build filename
+        env:
+          ZOOM_TOPIC: ${{ github.event.client_payload.zoom_topic }}
+          ZOOM_START_TIME: ${{ github.event.client_payload.zoom_start_time }}
+        run: |
+          START_STR="${ZOOM_START_TIME:0:10}"
+          [ -z "$START_STR" ] && START_STR="unknown-date"
+
+          SAFE_TOPIC=$(echo "$ZOOM_TOPIC" | python3 -c "
+          import sys
+          t = sys.stdin.read().strip()[:80]
+          print(''.join(c if c.isalnum() or c in ' _-()' else '_' for c in t).strip())
+          ")
+          [ -z "$SAFE_TOPIC" ] && SAFE_TOPIC="recording"
+
+          YEAR="${START_STR:0:4}"
+          [ -z "$YEAR" ] || [ "$YEAR" = "unkn" ] && YEAR="unknown"
+
+          echo "FILENAME=${START_STR}_${SAFE_TOPIC}.mp4" >> $GITHUB_ENV
+          echo "YEAR=$YEAR"                               >> $GITHUB_ENV
+
+      - name: Download from Zoom (pre-signed URL from server)
+        env:
+          DOWNLOAD_URL: ${{ github.event.client_payload.download_url }}
+        run: |
+          curl -L "$DOWNLOAD_URL" -o "$FILENAME" --fail --progress-bar
+          [ -f "$FILENAME" ] || { echo "❌ Download failed"; exit 1; }
+          echo "✅ Downloaded: $FILENAME ($(du -sh "$FILENAME" | cut -f1))"
+
+      - name: Upload to Google Drive
+        run: |
+          rclone copy "$FILENAME" "gdrive:Zoom Recordings/$YEAR" --progress
+
+      - name: Get Google Drive shareable link
+        run: |
+          GDRIVE_LINK=$(rclone link "gdrive:Zoom Recordings/$YEAR/$FILENAME" 2>/dev/null || echo "")
+          echo "GDRIVE_LINK=$GDRIVE_LINK" >> $GITHUB_ENV
+          echo "🔗 Drive link: $GDRIVE_LINK"
+
+      - name: Notify backend webhook
+        if: always()
+        env:
+          REC_ID:     ${{ github.event.client_payload.rec_id }}
+          SITE_URL:   ${{ github.event.client_payload.site_url }}
+          API_KEY:    ${{ github.event.client_payload.api_key || secrets.ZOOM_STATUS_API_KEY }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          [ "$JOB_STATUS" = "success" ] && GDRIVE_STATUS="done" || GDRIVE_STATUS="failed"
+
+          curl --fail-with-body -sS -X POST "${SITE_URL}/zoom/recordings/${REC_ID}/update-status" \
+            -H "Content-Type: application/json" \
+            -H "X-Api-Key: $API_KEY" \
+            -d "{
+              \"zoom_status\":   \"done\",
+              \"gdrive_status\": \"$GDRIVE_STATUS\",
+              \"gdrive_path\":   \"Zoom Recordings/$YEAR/$FILENAME\",
+              \"gdrive_link\":   \"$GDRIVE_LINK\"
+            }"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$FILENAME"
